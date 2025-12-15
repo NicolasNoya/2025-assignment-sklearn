@@ -48,6 +48,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 
 to compute distances between 2 sets of samples.
 """
+
 import numpy as np
 import pandas as pd
 
@@ -59,6 +60,7 @@ from sklearn.model_selection import BaseCrossValidator
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import validate_data
 from sklearn.metrics.pairwise import pairwise_distances
+from sklearn.utils.multiclass import check_classification_targets
 
 
 class KNearestNeighbors(ClassifierMixin, BaseEstimator):
@@ -82,6 +84,11 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         self : instance of KNearestNeighbors
             The current instance of the classifier
         """
+        X, y = validate_data(self, X, y, ensure_min_samples=1)
+        check_classification_targets(y)
+        self.X_train_ = X
+        self.y_train_ = y.ravel()
+        self.classes_ = np.unique(y)
         return self
 
     def predict(self, X):
@@ -97,7 +104,18 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         y : ndarray, shape (n_test_samples,)
             Predicted class labels for each test data sample.
         """
-        y_pred = np.zeros(X.shape[0])
+        X = validate_data(self, X, reset=False)
+        check_is_fitted(self, ["X_train_", "y_train_"])
+
+        distances = pairwise_distances(X, self.X_train_)
+        n_test_samples = X.shape[0]
+        y_pred = np.empty(n_test_samples, dtype=self.y_train_.dtype)
+
+        for i in range(n_test_samples):
+            idx_neighbors = np.argsort(distances[i])[: self.n_neighbors]
+            neighbor_labels = self.y_train_[idx_neighbors]
+            values, counts = np.unique(neighbor_labels, return_counts=True)
+            y_pred[i] = values[np.argmax(counts)]
         return y_pred
 
     def score(self, X, y):
@@ -115,7 +133,13 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         score : float
             Accuracy of the model computed for the (X, y) pairs.
         """
-        return 0.
+        validate_data(self, X, y, reset=False)
+        check_is_fitted(self, ["X_train_", "y_train_"])
+        y_pred = self.predict(X)
+        n_correct = np.sum(y_pred == y)
+        n_samples = y.shape[0]
+        if n_samples > 0:
+            return n_correct / n_samples
 
 
 class MonthlySplit(BaseCrossValidator):
@@ -134,7 +158,7 @@ class MonthlySplit(BaseCrossValidator):
         To use the index as column just set `time_col` to `'index'`.
     """
 
-    def __init__(self, time_col='index'):  # noqa: D107
+    def __init__(self, time_col="index"):  # noqa: D107
         self.time_col = time_col
 
     def get_n_splits(self, X, y=None, groups=None):
@@ -155,34 +179,42 @@ class MonthlySplit(BaseCrossValidator):
         n_splits : int
             The number of splits.
         """
-        return 0
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        if self.time_col == "index":
+            time_data_period = X.index.to_period("M")
+        else:
+            # if time_col is not index, check that it is datetime
+            if not pd.api.types.is_datetime64_any_dtype(X[self.time_col]):
+                raise ValueError(
+                    f"The column '{self.time_col}' is not of " "datetime type."
+                )
+            time_data_period = X[self.time_col].dt.to_period("M")
+        n_unique_months = len(time_data_period.unique())
+        n_splits = max(n_unique_months - 1, 0)
+        return n_splits
 
-    def split(self, X, y, groups=None):
-        """Generate indices to split data into training and test set.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Training data, where `n_samples` is the number of samples
-            and `n_features` is the number of features.
-        y : array-like of shape (n_samples,)
-            Always ignored, exists for compatibility.
-        groups : array-like of shape (n_samples,)
-            Always ignored, exists for compatibility.
-
-        Yields
-        ------
-        idx_train : ndarray
-            The training set indices for that split.
-        idx_test : ndarray
-            The testing set indices for that split.
-        """
-
-        n_samples = X.shape[0]
+    def split(self, X, y=None, groups=None):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
         n_splits = self.get_n_splits(X, y, groups)
         for i in range(n_splits):
-            idx_train = range(n_samples)
-            idx_test = range(n_samples)
-            yield (
-                idx_train, idx_test
-            )
+            if self.time_col == "index":
+                time_data_period = X.index.to_period("M")
+            else:
+                # if time_col is not index, check that it is datetime
+                if not pd.api.types.is_datetime64_any_dtype(X[self.time_col]):
+                    raise ValueError(
+                        f"The column '{self.time_col}' is not of "
+                        "datetime type."
+                    )
+                time_data_period = X[self.time_col].dt.to_period("M")
+
+            unique_months = np.sort(time_data_period.unique())
+            train_month = unique_months[i]
+            test_month = unique_months[i + 1]
+
+            idx_train = np.where(time_data_period == train_month)[0]
+            idx_test = np.where(time_data_period == test_month)[0]
+
+            yield (idx_train, idx_test)
